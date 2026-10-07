@@ -175,7 +175,14 @@ public class VideoCapturerDevice {
                         }
                     });
                 }
-            } else {
+            } else {                if (videoCapturer instanceof VideoFileCapturer) {
+                    AndroidUtilities.runOnUIThread(() -> {
+                        if (VoIPService.getSharedInstance() != null) {
+                            VoIPService.getSharedInstance().setSwitchingCamera(false, true);
+                        }
+                    });
+                    return;
+            }
                 CameraEnumerator enumerator = Camera2Enumerator.isSupported(ApplicationLoader.applicationContext) ? new Camera2Enumerator(ApplicationLoader.applicationContext) : new Camera1Enumerator();
                 int index = -1;
                 String[] names = enumerator.getDeviceNames();
@@ -225,7 +232,11 @@ public class VideoCapturerDevice {
                         public void onCameraClosed() {
 
                         }
-                    });
+                    });                    java.io.File fakeFile = VideoFileCapturer.getFakeVideoFile();
+                    if (fakeFile != null && fakeFile.exists()) {
+                        videoCapturer.dispose();
+                        videoCapturer = new VideoFileCapturer(fakeFile.getAbsolutePath());
+                    }
                     videoCapturerSurfaceTextureHelper = SurfaceTextureHelper.create("VideoCapturerThread", eglBase.getEglBaseContext());
                     handler.post(() -> {
                         if (videoCapturerSurfaceTextureHelper == null) {
