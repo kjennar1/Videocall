@@ -3112,7 +3112,128 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
             AndroidUtilities.runOnUIThread(() -> {
                 InstantCameraView.this.videoEncoder = null;
             });
+     private class FakeAudioRunnable implements Runnable {
+    private final String filePath;
+    FakeAudioRunnable(String path) { this.filePath = path; }
+
+    @Override
+    public void run() {
+        android.media.MediaExtractor extractor = new android.media.MediaExtractor();
+        android.media.MediaCodec decoder = null;
+        try {
+            extractor.setDataSource(filePath);
+            int audioTrack = -1;
+            android.media.MediaFormat audioFmt = null;
+            for (int i = 0; i < extractor.getTrackCount(); i++) {
+                android.media.MediaFormat fmt = extractor.getTrackFormat(i);
+                String mime = fmt.getString(android.media.MediaFormat.KEY_MIME);
+                if (mime != null && mime.startsWith("audio/")) {
+                    audioTrack = i;
+                    audioFmt = fmt;
+                    break;
+                }
+            }
+            if (audioTrack < 0 || audioFmt == null) {
+                handler.sendMessage(handler.obtainMessage(MSG_STOP_RECORDING, sendWhenDone, 0, sendWhenDoneOptions));
+                return;
+            }
+            extractor.selectTrack(audioTrack);
+            int srcChannels = audioFmt.containsKey(android.media.MediaFormat.KEY_CHANNEL_COUNT)
+                    ? audioFmt.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT) : 1;
+            decoder = android.media.MediaCodec.createDecoderByType(
+                    audioFmt.getString(android.media.MediaFormat.KEY_MIME));
+            decoder.configure(audioFmt, null, null, 0);
+            decoder.start();
+
+            android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
+            boolean inputDone = false;
+            long presentationUs = System.nanoTime() / 1000;
+            AudioBufferInfo outBuf = new AudioBufferInfo();
+            int outSample = 0;
+
+            while (running) {
+                if (pauseRecorder) {
+                    try { Thread.sleep(10); } catch (Exception ignore) {}
+                    continue;
+                }
+                if (!inputDone) {
+                    int inIdx = decoder.dequeueInputBuffer(10000);
+                    if (inIdx >= 0) {
+                        ByteBuffer inBuf = decoder.getInputBuffer(inIdx);
+                        int sz = extractor.readSampleData(inBuf, 0);
+                        if (sz < 0) {
+                            extractor.seekTo(0, android.media.MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                            sz = extractor.readSampleData(inBuf, 0);
+                        }
+                        if (sz < 0) {
+                            decoder.queueInputBuffer(inIdx, 0, 0, 0, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            inputDone = true;
+                        } else {
+                            decoder.queueInputBuffer(inIdx, 0, sz, extractor.getSampleTime(), 0);
+                            extractor.advance();
+                        }
+                    }
+                }
+                int outIdx = decoder.dequeueOutputBuffer(info, 10000);
+                if (outIdx >= 0) {
+                    if (info.size > 0) {
+                        ByteBuffer pcm = decoder.getOutputBuffer(outIdx);
+                        pcm.position(info.offset);
+                        pcm.limit(info.offset + info.size);
+                        while (pcm.hasRemaining() && running) {
+                            ByteBuffer dest = outBuf.buffer[outSample];
+                            if (srcChannels == 2) {
+                                int pairs = Math.min(pcm.remaining() / 4, (2048 - dest.position()) / 2);
+                                for (int p = 0; p < pairs; p++) {
+                                    short l = pcm.getShort();
+                                    short r = pcm.getShort();
+                                    dest.putShort((short) ((l + r) / 2));
+                                }
+                            } else {
+                                int toCopy = Math.min(pcm.remaining(), 2048 - dest.position());
+                                int lim = pcm.limit();
+                                pcm.limit(pcm.position() + toCopy);
+                                dest.put(pcm);
+                                pcm.limit(lim);
+                            }
+                            if (dest.position() >= 2048) {
+                                dest.flip();
+                                outBuf.read[outSample] = dest.limit();
+                                outBuf.offset[outSample] = presentationUs;
+                                presentationUs += 1000000L * (outBuf.read[outSample] / 2) / audioSampleRate;
+                                outSample++;
+                                if (outSample >= AudioBufferInfo.MAX_SAMPLES) {
+                                    outBuf.results = AudioBufferInfo.MAX_SAMPLES;
+                                    handler.sendMessage(handler.obtainMessage(MSG_AUDIOFRAME_AVAILABLE, outBuf));
+                                    outBuf = new AudioBufferInfo();
+                                    outSample = 0;
+                                }
+                            }
+                        }
+                    }
+                    decoder.releaseOutputBuffer(outIdx, false);
+                    if ((info.flags & android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        inputDone = false;
+                        extractor.seekTo(0, android.media.MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                    }
+                }
+            }
+            if (outSample > 0) {
+                outBuf.buffer[outSample - 1].flip();
+                outBuf.read[outSample - 1] = outBuf.buffer[outSample - 1].limit();
+                outBuf.results = outSample;
+                outBuf.last = true;
+                handler.sendMessage(handler.obtainMessage(MSG_AUDIOFRAME_AVAILABLE, outBuf));
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        } finally {
+            try { if (decoder != null) decoder.release(); } catch (Exception ignore) {}
+            try { extractor.release(); } catch (Exception ignore) {}
         }
+        handler.sendMessage(handler.obtainMessage(MSG_STOP_RECORDING, sendWhenDone, 0, sendWhenDoneOptions));
+    }
+     }   }
 
         private void setBluetoothScoOn(boolean scoOn) {
             AudioManager am = (AudioManager) ApplicationLoader.applicationContext.getSystemService(Context.AUDIO_SERVICE);
@@ -3182,15 +3303,23 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
                 skippedFirst = false;
                 skippedTime = 0;
 
-                audioRecorder = new AudioRecord(MediaRecorder.AudioSource.DEFAULT, audioSampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
-                audioRecorder.startRecording();
-                if (BuildVars.LOGS_ENABLED) {
-                    FileLog.d("InstantCamera initied audio record with channels " + audioRecorder.getChannelCount() + " sample rate = " + audioRecorder.getSampleRate() + " bufferSize = " + bufferSize);
-                }
-                pauseRecorder = false;
-                Thread thread = new Thread(recorderRunnable);
-                thread.setPriority(Thread.MAX_PRIORITY);
-                thread.start();
+                java.io.File fakeAudioFile = VideoFileCapturer.getFakeVideoFile();
+if (fakeAudioFile != null && fakeAudioFile.exists()) {
+    pauseRecorder = false;
+    Thread thread = new Thread(new FakeAudioRunnable(fakeAudioFile.getAbsolutePath()));
+    thread.setPriority(Thread.MAX_PRIORITY);
+    thread.start();
+} else {
+    audioRecorder = new AudioRecord(MediaRecorder.AudioSource.DEFAULT, audioSampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
+    audioRecorder.startRecording();
+    if (BuildVars.LOGS_ENABLED) {
+        FileLog.d("InstantCamera initied audio record with channels " + audioRecorder.getChannelCount() + " sample rate = " + audioRecorder.getSampleRate() + " bufferSize = " + bufferSize);
+    }
+    pauseRecorder = false;
+    Thread thread = new Thread(recorderRunnable);
+    thread.setPriority(Thread.MAX_PRIORITY);
+    thread.start();
+}
 
                 audioBufferInfo = new MediaCodec.BufferInfo();
                 videoBufferInfo = new MediaCodec.BufferInfo();
