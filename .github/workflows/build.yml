@@ -1,0 +1,31 @@
+name: Build APK
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Insert API keys
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+        run: |
+          F=TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+          sed -i "s/APP_ID = [0-9]*;/APP_ID = $TG_API_ID;/" $F
+          sed -i "s/APP_HASH = \"[^\"]*\"/APP_HASH = \"$TG_API_HASH\"/" $F
+      - name: Accept licenses
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      - name: Build
+        run: chmod +x gradlew && ./gradlew :TMessagesProj_App:assembleAfatDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-apk
+          path: TMessagesProj_App/build/outputs/apk/**/*.apk
