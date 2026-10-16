@@ -3114,3 +3114,5 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
             });
             }
             }
+}
+}
