@@ -23,8 +23,9 @@ jobs:
           sed -i "s/APP_HASH = \"[^\"]*\"/APP_HASH = \"$TG_API_HASH\"/" $F
       - name: Accept licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-        - name: Restore InstantCameraView
-        run: curl -o TMessagesProj/src/main/java/org/telegram/ui/Components/InstantCameraView.java https://raw.githubusercontent.com/DrKLO/Telegram/master/TMessagesProj/src/main/java/org/telegram/ui/Components/InstantCameraView.java    - name: Build
+      - name: Restore InstantCameraView
+        run: curl -o TMessagesProj/src/main/java/org/telegram/ui/Components/InstantCameraView.java https://raw.githubusercontent.com/DrKLO/Telegram/master/TMessagesProj/src/main/java/org/telegram/ui/Components/InstantCameraView.java
+      - name: Build
         run: chmod +x gradlew && ./gradlew :TMessagesProj_App:assembleAfatDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
